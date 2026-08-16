@@ -1,0 +1,24 @@
+#!/bin/sh
+# Blocks any staged text change that adds a run of 20+ consecutive digits.
+# The repo is public; the one realistic leak is a real voucher code (34 digits)
+# or a backup dump pasted somewhere. Committed test fixtures keep GTIN (14) and
+# serial (16) split so they never trip this.
+#
+# package-lock.json is exempt (integrity hashes are base64 and can contain
+# long digit runs by chance).
+
+hits=$(git diff --cached -U0 -- . ':(exclude)package-lock.json' \
+  | grep -E '^\+' \
+  | grep -E '[0-9]{20,}' \
+  | head -5)
+
+if [ -n "$hits" ]; then
+  echo "✖ pre-commit: a staged change contains a run of 20+ consecutive digits:" >&2
+  echo "$hits" | cut -c1-100 >&2
+  echo "" >&2
+  echo "  This looks like a real voucher code or an export dump — the repo is PUBLIC." >&2
+  echo "  If this is intentional (it almost never is), commit with:  git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0

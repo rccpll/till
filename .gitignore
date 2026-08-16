@@ -1,0 +1,26 @@
+# Voucher PDFs are money — never commit them
+*.pdf
+
+# Backups / exports
+backups/
+*.export.json
+
+# Secrets
+.dev.vars
+.dev-token
+.env
+.env.*
+
+# Local-only config: wrangler.toml holds this deployment's D1 database id
+# (see README for the template); the rest is personal tooling notes.
+wrangler.toml
+.impeccable.md
+.claude/
+
+# Cloudflare / build
+.wrangler/
+dist/
+node_modules/
+
+# OS
+.DS_Store
