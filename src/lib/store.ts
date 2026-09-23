@@ -4,7 +4,9 @@
 // Display state = last-known server state with the pending queue replayed on
 // top. Flushing is FIFO; a network/5xx failure pauses the queue (retried with
 // backoff and on 'online'), a 4xx removes the action and records a rejection
-// that must be dismissed by hand.
+// that must be dismissed by hand — except an expired Access session (redirect
+// to the login page, or 401/403), which keeps the queue intact and surfaces a
+// "sign in again" banner instead.
 import { useSyncExternalStore } from 'react';
 import type { AppState, Voucher } from './api';
 import {
@@ -24,6 +26,8 @@ export interface WalletState {
   /** refused actions awaiting manual dismissal (the blocking banner) */
   rejections: Rejection[];
   online: boolean;
+  /** the Access session expired: nothing syncs until the user signs in again */
+  authExpired: boolean;
   loaded: boolean;
 }
 
@@ -32,6 +36,7 @@ interface Internal {
   queue: QueuedAction[];
   rejections: Rejection[];
   online: boolean;
+  authExpired: boolean;
   loaded: boolean;
 }
 
@@ -40,6 +45,7 @@ const internal: Internal = {
   queue: [],
   rejections: [],
   online: navigator.onLine,
+  authExpired: false,
   loaded: false,
 };
 
@@ -55,6 +61,7 @@ function compute(): WalletState {
     pendingIds: new Set(internal.queue.map(a => a.voucher_id)),
     rejections: internal.rejections,
     online: internal.online,
+    authExpired: internal.authExpired,
     loaded: internal.loaded,
   };
 }
@@ -85,6 +92,10 @@ export async function boot(): Promise<void> {
 
   window.addEventListener('online', () => { internal.online = true; emit(); void flush(); });
   window.addEventListener('offline', () => { internal.online = false; emit(); });
+  // a home-screen app is resumed far more often than it is relaunched
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void flush().then(refresh);
+  });
 
   // 1. hydrate from cache instantly (the barcode must render offline)
   const cached = await readCachedState<AppState>();
@@ -99,10 +110,25 @@ export async function boot(): Promise<void> {
   await refresh();
 }
 
+// Access answers an expired session with a redirect to its login page. Fetched
+// with redirect: 'manual' that is an opaque redirect (status 0) rather than a
+// CORS failure indistinguishable from being offline.
+function isAuthFailure(res: Response): boolean {
+  return res.type === 'opaqueredirect' || res.status === 401 || res.status === 403;
+}
+
+function setAuthExpired(expired: boolean): void {
+  if (internal.authExpired === expired) return;
+  internal.authExpired = expired;
+  emit();
+}
+
 export async function refresh(): Promise<void> {
   try {
-    const res = await fetch('/api/state');
+    const res = await fetch('/api/state', { redirect: 'manual' });
+    if (isAuthFailure(res)) return setAuthExpired(true);
     if (!res.ok) return;
+    internal.authExpired = false;
     const state = await res.json() as AppState;
     internal.server = state;
     internal.loaded = true;
@@ -161,6 +187,7 @@ export async function flush(): Promise<void> {
       try {
         res = await fetch(`/api/vouchers/${action.voucher_id}/${action.endpoint}`, {
           method: 'POST',
+          redirect: 'manual',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ...action.params,
@@ -172,6 +199,14 @@ export async function flush(): Promise<void> {
         scheduleRetry(action);
         return; // offline/unreachable — keep FIFO order, try again later
       }
+
+      if (isAuthFailure(res)) {
+        // not a refusal of the action: keep it queued until the user signs in
+        // (the next boot/foreground/online flush picks it up)
+        setAuthExpired(true);
+        return;
+      }
+      setAuthExpired(false);
 
       if (res.ok) {
         await removeQueued(action.seq!);

@@ -1,7 +1,7 @@
 // The wallet: Available / History tabs, deliberately sparse cards, and the
 // blocking sync-rejection banner. Tapping a card goes straight to the barcode.
 import { useState } from 'react';
-import { TriangleAlert, WifiOff } from 'lucide-react';
+import { LogIn, TriangleAlert, WifiOff } from 'lucide-react';
 import type { Voucher } from '../../lib/api';
 import {
   availableList, expiresSoon, headerCount, headerTotalCents, historyMonths, isSpentOpen,
@@ -37,6 +37,17 @@ export default function Wallet() {
               </span>
             )}
           </div>
+          {wallet.authExpired && (
+            <div className="mt-4 rounded-xl border bg-card px-4 py-3 flex items-center justify-between gap-3" role="alert">
+              <p className="text-sm">
+                <span className="font-semibold">Signed out</span>
+                <span className="text-muted-foreground"> · changes aren't syncing</span>
+              </p>
+              <Button size="sm" onClick={() => { window.location.href = '/api/login'; }}>
+                <LogIn aria-hidden="true" /> Sign in again
+              </Button>
+            </div>
+          )}
         </div>
       </header>
 

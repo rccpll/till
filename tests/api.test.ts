@@ -23,6 +23,17 @@ describe('auth (criterion 10)', () => {
     expect(res.status).toBe(403);
   });
 
+  it('/api/login redirects to the wallet with a valid JWT', async () => {
+    const res = await call('GET', '/api/login');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/');
+  });
+
+  it('/api/login is 403 without a JWT (Access intercepts it in production)', async () => {
+    const res = await call('GET', '/api/login', { token: null });
+    expect(res.status).toBe(403);
+  });
+
   it('200 with a valid JWT; actor is the verified email claim', async () => {
     const { voucher } = await addOne();
     const state = await (await call('GET', '/api/state')).json() as { vouchers: { id: string; created_by: string }[] };

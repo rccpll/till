@@ -69,6 +69,11 @@ async function replayResponse(db: D1Database, event: EventRow) {
 
 // ---------------------------------------------------------------- state
 
+// Re-login entry point. The service worker never serves /api/*, so a full-page
+// navigation here reaches Cloudflare Access, which shows its login page when
+// the session has expired; once through, we just bounce back to the wallet.
+app.get('/login', (c) => c.redirect('/', 302));
+
 app.get('/state', async (c) => {
   const db = c.env.DB;
   const [vouchers, gtins, meta] = await Promise.all([

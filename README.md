@@ -53,6 +53,10 @@ Runs entirely on Cloudflare's free tier (no R2 — it requires a card).
    `CF_ACCESS_AUD` = the AUD tag. Redeploy.
 6. **Phones**: open `https://<project>.pages.dev` in Safari → log in → Share →
    **Add to Home Screen**. Add vouchers from a desktop at `/upload`.
+   When the Access session expires the app shows **Sign in again** — tap it;
+   queued changes sync after login. Never remove the home-screen app while
+   cards show **pending**: iOS deletes its storage, and the unsynced queue
+   with it (the home-screen app also has its own login, separate from Safari).
 
 ## Backups
 
