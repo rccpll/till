@@ -56,8 +56,37 @@ export class ApiError extends Error {
   }
 }
 
+/** The Access session expired: the user has to sign in again (signInUrl). */
+export class AuthExpiredError extends Error {
+  constructor() {
+    super('signed out');
+  }
+}
+
+// Access answers an expired session with a redirect to its login page. Fetched
+// with redirect: 'manual' that is an opaque redirect (status 0) rather than a
+// CORS failure indistinguishable from being offline.
+export function isAuthFailure(res: Response): boolean {
+  return res.type === 'opaqueredirect' || res.status === 401 || res.status === 403;
+}
+
+/**
+ * Full-page navigation target that goes through Access's login and comes back
+ * to `next`. A navigation, not a fetch: the service worker never serves /api/*.
+ */
+export function signInUrl(next = '/'): string {
+  return `/api/login?next=${encodeURIComponent(next)}`;
+}
+
+/** fetch for /api/*: throws AuthExpiredError instead of following Access's login redirect. */
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const res = await fetch(path, { ...init, redirect: 'manual' });
+  if (isAuthFailure(res)) throw new AuthExpiredError();
+  return res;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await apiFetch(path, {
     method,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,

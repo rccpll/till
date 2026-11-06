@@ -8,7 +8,7 @@
 // to the login page, or 401/403), which keeps the queue intact and surfaces a
 // "sign in again" banner instead.
 import { useSyncExternalStore } from 'react';
-import type { AppState, Voucher } from './api';
+import { isAuthFailure, type AppState, type Voucher } from './api';
 import {
   addRejection, bumpTries, dismissRejection as idbDismissRejection, enqueue,
   listQueue, listRejections, readCachedState, removeQueued, replayQueue,
@@ -110,13 +110,6 @@ export async function boot(): Promise<void> {
   await refresh();
 }
 
-// Access answers an expired session with a redirect to its login page. Fetched
-// with redirect: 'manual' that is an opaque redirect (status 0) rather than a
-// CORS failure indistinguishable from being offline.
-function isAuthFailure(res: Response): boolean {
-  return res.type === 'opaqueredirect' || res.status === 401 || res.status === 403;
-}
-
 function setAuthExpired(expired: boolean): void {
   if (internal.authExpired === expired) return;
   internal.authExpired = expired;
@@ -141,7 +134,8 @@ export async function refresh(): Promise<void> {
 
 // ------------------------------------------------------------------ actions
 
-async function act(endpoint: ActionEndpoint, voucherId: string, params: Record<string, unknown> = {}): Promise<void> {
+/** Queues an action and returns its client_action_id (what an Undo names). */
+function act(endpoint: ActionEndpoint, voucherId: string, params: Record<string, unknown> = {}): string {
   const action: Omit<QueuedAction, 'seq' | 'tries'> = {
     client_action_id: crypto.randomUUID(),
     voucher_id: voucherId,
@@ -150,17 +144,25 @@ async function act(endpoint: ActionEndpoint, voucherId: string, params: Record<s
     actor: snapshot.me ?? 'unknown',
     client_ts: new Date().toISOString(),
   };
-  await enqueue(action);
-  internal.queue = await listQueue();
-  emit();
-  void flush();
+  void (async () => {
+    await enqueue(action);
+    internal.queue = await listQueue();
+    emit();
+    void flush();
+  })();
+  return action.client_action_id;
 }
 
 export const actions = {
   use: (id: string) => act('use', id),
   alreadyEmpty: (id: string) => act('already_empty', id),
   spend: (id: string, used_cents: number) => act('spend', id, { used_cents }),
-  unmark: (id: string) => act('unmark', id),
+  /**
+   * Undo `undoActionId` (an id returned by another action) — or, without it,
+   * the latest change, as a deliberate "restore" from the details screen.
+   */
+  unmark: (id: string, undoActionId?: string) =>
+    act('unmark', id, undoActionId ? { undo_action_id: undoActionId } : {}),
   void: (id: string, note: string) => act('void', id, { note }),
   scanFailed: (id: string) => act('scan_failed', id),
 };
@@ -182,7 +184,9 @@ export async function flush(): Promise<void> {
   if (flushing || !navigator.onLine) return;
   flushing = true;
   try {
+    const dropped = new Set<number>();
     for (const action of [...internal.queue].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
+      if (dropped.has(action.seq!)) continue;
       let res: Response;
       try {
         res = await fetch(`/api/vouchers/${action.voucher_id}/${action.endpoint}`, {
@@ -230,6 +234,14 @@ export async function flush(): Promise<void> {
           body: await res.json().catch(() => null),
           rejected_at: new Date().toISOString(),
         });
+        // an Undo of a refused action has nothing to undo: drop it rather
+        // than let it fail into a second banner
+        for (const undo of internal.queue) {
+          if (undo.endpoint === 'unmark' && undo.params.undo_action_id === action.client_action_id) {
+            await removeQueued(undo.seq!);
+            dropped.add(undo.seq!);
+          }
+        }
         internal.rejections = await listRejections();
       }
       internal.queue = await listQueue();

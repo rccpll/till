@@ -35,9 +35,9 @@ export async function tokenFor(email: string, opts: { aud?: string; iss?: string
 export async function call(
   method: string,
   path: string,
-  opts: { body?: unknown; email?: string; token?: string | null } = {},
+  opts: { body?: unknown; email?: string; token?: string | null; headers?: Record<string, string> } = {},
 ) {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...opts.headers };
   const token = opts.token === undefined ? await tokenFor(opts.email ?? ALICE) : opts.token;
   if (token !== null) headers['Cf-Access-Jwt-Assertion'] = token;
   const res = await app.request(path, {

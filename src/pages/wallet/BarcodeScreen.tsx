@@ -75,19 +75,19 @@ export default function BarcodeScreen({ id }: { id: string }) {
   }
 
   function markUsed() {
-    void actions.use(id);
+    const used = actions.use(id);
     back();
     toast(`Marked as used · ${euros(voucher!.remaining_cents)}`, {
-      action: { label: 'Undo', onClick: () => { void actions.unmark(id); } },
+      action: { label: 'Undo', onClick: () => { actions.unmark(id, used); } },
     });
   }
 
   function partialConfirm(usedCents: number) {
-    void actions.spend(id, usedCents);
+    const spent = actions.spend(id, usedCents);
     setShowPartial(false);
     back();
     toast(`${euros(usedCents)} used · ${euros(voucher!.remaining_cents - usedCents)} left`, {
-      action: { label: 'Undo', onClick: () => { void actions.unmark(id); } },
+      action: { label: 'Undo', onClick: () => { actions.unmark(id, spent); } },
     });
   }
 

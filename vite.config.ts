@@ -15,6 +15,9 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      // registered by src/lib/sw.ts, which also checks for updates on resume
+      // and defers the reload to a safe moment
+      injectRegister: false,
       // Precache the wallet shell only. The desktop-only parsing stack
       // (pdfjs worker, zxing wasm, Upload/parse chunks) is megabytes the
       // phone never needs offline — upload requires the network anyway.

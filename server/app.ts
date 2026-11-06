@@ -7,7 +7,7 @@
 //  - duplicates on add are dropped entirely: no row, no event
 //  - client_action_id replays return the original outcome, never apply twice
 import { Hono, type Context } from 'hono';
-import { requireAccess } from './auth';
+import { rejectCrossSite, requireAccess } from './auth';
 import type { Env } from './env';
 import {
   VOUCHER_COLS, b64decode, b64encode,
@@ -17,6 +17,7 @@ import {
 type Ctx = { Bindings: Env; Variables: { actor: string } };
 
 const app = new Hono<Ctx>().basePath('/api');
+app.use('*', rejectCrossSite);
 app.use('*', requireAccess);
 
 const now = () => new Date().toISOString();
@@ -34,22 +35,41 @@ async function findReplay(db: D1Database, clientActionId: string | undefined) {
     .bind(clientActionId).first<EventRow>();
 }
 
-function eventInsert(
-  db: D1Database,
-  e: {
-    voucher_id: string; type: EventType; actor: string;
-    amount_cents?: number | null; previous_remaining_cents?: number | null;
-    note?: string | null; client_action_id?: string | null;
-  },
-) {
+interface EventFields {
+  voucher_id: string; type: EventType; actor: string;
+  amount_cents?: number | null; previous_remaining_cents?: number | null;
+  note?: string | null; client_action_id?: string | null;
+}
+
+const EVENT_COLS =
+  'voucher_id, type, amount_cents, previous_remaining_cents, actor, note, client_action_id, created_at';
+
+function eventInsert(db: D1Database, e: EventFields) {
   return db.prepare(
-    `INSERT INTO voucher_events
-       (voucher_id, type, amount_cents, previous_remaining_cents, actor, note, client_action_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(
+    `INSERT INTO voucher_events (${EVENT_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(...eventValues(e));
+}
+
+/**
+ * The event for a guarded UPDATE, batched right after it: inserted only if
+ * that UPDATE changed a row. A request that loses the compare-and-set race
+ * must leave no trace — no phantom history, no stored client_action_id that a
+ * retry would "replay" as success, nothing for unmark to roll back.
+ * D1 runs a batch as one transaction on one connection, so changes() is the
+ * UPDATE's row count.
+ */
+function guardedEventInsert(db: D1Database, e: EventFields) {
+  return db.prepare(
+    `INSERT INTO voucher_events (${EVENT_COLS})
+     SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0`,
+  ).bind(...eventValues(e));
+}
+
+function eventValues(e: EventFields) {
+  return [
     e.voucher_id, e.type, e.amount_cents ?? null, e.previous_remaining_cents ?? null,
     e.actor, e.note ?? null, e.client_action_id ?? null, now(),
-  );
+  ];
 }
 
 function conflict(v: VoucherRow) {
@@ -59,6 +79,15 @@ function conflict(v: VoucherRow) {
     used_by: v.used_by,
     used_at: v.used_at,
   };
+}
+
+/** 409 for a guarded update that matched no row: someone changed the voucher first. */
+async function lostRace(c: Context<Ctx>, db: D1Database, id: string) {
+  const fresh = await getVoucher(db, id);
+  if (!fresh) return c.json({ error: 'not found' }, 404);
+  if (fresh.status !== 'available') return c.json(conflict(fresh), 409);
+  // still available, but the amount moved under us (a concurrent spend)
+  return c.json({ error: 'concurrent modification, retry with fresh state' }, 409);
 }
 
 /** Replay response for an already-applied client_action_id. */
@@ -71,8 +100,21 @@ async function replayResponse(db: D1Database, event: EventRow) {
 
 // Re-login entry point. The service worker never serves /api/*, so a full-page
 // navigation here reaches Cloudflare Access, which shows its login page when
-// the session has expired; once through, we just bounce back to the wallet.
-app.get('/login', (c) => c.redirect('/', 302));
+// the session has expired; once through, we bounce back to `next` (a local
+// path only, never another origin) or the wallet.
+app.get('/login', (c) => c.redirect(localPath(c.req.query('next')), 302));
+
+/**
+ * `next` as a same-origin path, or '/'. Resolved with the URL parser rather
+ * than a regex: browsers strip tabs/newlines and treat '\' as '/', so strings
+ * like "/\t/evil.com" pass a prefix check yet navigate off-site.
+ */
+function localPath(next: string | undefined): string {
+  if (!next?.startsWith('/')) return '/';
+  const base = 'https://till.invalid';
+  const url = new URL(next, base);
+  return url.origin === base ? url.pathname + url.search + url.hash : '/';
+}
 
 app.get('/state', async (c) => {
   const db = c.env.DB;
@@ -188,6 +230,8 @@ interface WriteBody {
   used_cents?: number;
   remaining_cents?: number;
   note?: string;
+  /** unmark: the client_action_id of the action this Undo reverses */
+  undo_action_id?: string;
   /** Offline queue: when the action actually happened on the client. */
   client_ts?: string;
 }
@@ -219,7 +263,7 @@ async function closeVoucher(c: Context<Ctx, '/vouchers/:id/use' | '/vouchers/:id
       `UPDATE vouchers SET remaining_cents = 0, status = 'used', used_at = ?, used_by = ?
        WHERE id = ? AND status = 'available' AND remaining_cents = ?`,
     ).bind(ts, actor, id, v.remaining_cents),
-    eventInsert(db, {
+    guardedEventInsert(db, {
       voucher_id: id, type, actor,
       amount_cents: type === 'used' ? v.remaining_cents : null,
       previous_remaining_cents: v.remaining_cents,
@@ -227,11 +271,8 @@ async function closeVoucher(c: Context<Ctx, '/vouchers/:id/use' | '/vouchers/:id
       client_action_id: body.client_action_id ?? null,
     }),
   ]);
-  if ((upd[0].meta.changes ?? 0) === 0) {
-    // lost a race: someone changed it between our read and the guarded update
-    const fresh = await getVoucher(db, id);
-    return c.json(conflict(fresh!), 409);
-  }
+  // lost a race: someone changed it between our read and the guarded update
+  if ((upd[0].meta.changes ?? 0) === 0) return lostRace(c, db, id);
   return c.json({ voucher: await getVoucher(db, id) });
 }
 
@@ -278,18 +319,14 @@ app.post('/vouchers/:id/spend', async (c) => {
       `UPDATE vouchers SET remaining_cents = ?
        WHERE id = ? AND status = 'available' AND remaining_cents = ?`,
     ).bind(newRemaining, id, v.remaining_cents),
-    eventInsert(db, {
+    guardedEventInsert(db, {
       voucher_id: id, type: 'spent', actor,
       amount_cents: usedCents, previous_remaining_cents: v.remaining_cents,
       note: body.note ?? null,
       client_action_id: body.client_action_id ?? null,
     }),
   ]);
-  if ((upd[0].meta.changes ?? 0) === 0) {
-    const fresh = await getVoucher(db, id);
-    if (!fresh || fresh.status !== 'available') return c.json(conflict(fresh!), 409);
-    return c.json({ error: 'concurrent modification, retry with fresh state' }, 409);
-  }
+  if ((upd[0].meta.changes ?? 0) === 0) return lostRace(c, db, id);
   return c.json({ voucher: await getVoucher(db, id) });
 });
 
@@ -324,14 +361,31 @@ app.post('/vouchers/:id/unmark', async (c) => {
   const v = await getVoucher(db, id);
   if (!v) return c.json({ error: 'not found' }, 404);
 
-  // the latest event that changed remaining/status is what we roll back
+  // Only the latest state change can be rolled back: undoing an older one
+  // would discard whatever came after it. An unmark is itself the latest
+  // change until something else happens, and can't be undone in turn.
   const last = await db.prepare(
     `SELECT * FROM voucher_events
-     WHERE voucher_id = ? AND type IN ('spent','used','already_empty','voided')
+     WHERE voucher_id = ? AND type IN ('spent','used','already_empty','voided','unmarked')
      ORDER BY id DESC LIMIT 1`,
   ).bind(id).first<EventRow>();
-  if (!last || last.previous_remaining_cents === null) {
-    return c.json({ error: 'nothing to unmark' }, 409);
+  if (!last || last.type === 'unmarked' || last.previous_remaining_cents === null) {
+    return c.json({ error: 'nothing to unmark', reason: 'nothing_to_undo' }, 409);
+  }
+  // An Undo names the action it reverses. If that action never applied (it
+  // lost a race or was refused) or someone acted after it, the Undo must not
+  // roll back another person's change instead.
+  if (body.undo_action_id !== undefined) {
+    const target = await findReplay(db, body.undo_action_id);
+    if (!target || target.voucher_id !== id) {
+      return c.json({ error: 'that action was never applied', reason: 'not_applied' }, 409);
+    }
+    if (target.id !== last.id) {
+      return c.json({
+        error: 'the voucher changed since that action', reason: 'changed_since',
+        changed_by: last.actor, changed_at: last.created_at,
+      }, 409);
+    }
   }
 
   const upd = await db.batch([
@@ -339,7 +393,7 @@ app.post('/vouchers/:id/unmark', async (c) => {
       `UPDATE vouchers SET remaining_cents = ?, status = 'available', used_at = NULL, used_by = NULL
        WHERE id = ? AND status = ? AND remaining_cents = ?`,
     ).bind(last.previous_remaining_cents, id, v.status, v.remaining_cents),
-    eventInsert(db, {
+    guardedEventInsert(db, {
       voucher_id: id, type: 'unmarked', actor,
       amount_cents: last.amount_cents,
       previous_remaining_cents: v.remaining_cents,
@@ -370,19 +424,19 @@ app.post('/vouchers/:id/void', async (c) => {
   // place it in a month and conflicts can say who closed it
   const upd = await db.batch([
     db.prepare(
-      `UPDATE vouchers SET status = 'voided', used_at = ?, used_by = ? WHERE id = ? AND status = 'available'`,
-    ).bind(body.client_ts ?? now(), actor, id),
-    eventInsert(db, {
+      // remaining_cents is pinned too: the event records it as the amount an
+      // unmark restores, so a concurrent spend must make this void lose
+      `UPDATE vouchers SET status = 'voided', used_at = ?, used_by = ?
+       WHERE id = ? AND status = 'available' AND remaining_cents = ?`,
+    ).bind(body.client_ts ?? now(), actor, id, v.remaining_cents),
+    guardedEventInsert(db, {
       voucher_id: id, type: 'voided', actor,
       previous_remaining_cents: v.remaining_cents,
       note: body.note ?? null,
       client_action_id: body.client_action_id ?? null,
     }),
   ]);
-  if ((upd[0].meta.changes ?? 0) === 0) {
-    const fresh = await getVoucher(db, id);
-    return c.json(conflict(fresh!), 409);
-  }
+  if ((upd[0].meta.changes ?? 0) === 0) return lostRace(c, db, id);
   return c.json({ voucher: await getVoucher(db, id) });
 });
 
@@ -408,7 +462,9 @@ app.get('/vouchers/:id/original.png', async (c) => {
   });
 });
 
-app.get('/export', async (c) => {
+// POST, not GET: it records last_export_at, and a state change must not be
+// reachable from a cross-site link or <img> (see rejectCrossSite).
+app.post('/export', async (c) => {
   const db = c.env.DB;
   const ts = now();
   const [vouchers, events, gtins] = await Promise.all([

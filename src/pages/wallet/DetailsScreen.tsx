@@ -46,16 +46,16 @@ export default function DetailsScreen({ id }: { id: string }) {
   const canUnmark = voucher.status !== 'available' || voucher.remaining_cents < voucher.face_value_cents;
 
   function unmark() {
-    void actions.unmark(id);
+    actions.unmark(id);
     back();
     toast('Restored to available');
   }
 
   function confirmVoid() {
-    void actions.void(id, voidNote.trim() || 'voided from details');
+    const voided = actions.void(id, voidNote.trim() || 'voided from details');
     back();
     toast('Voucher voided', {
-      action: { label: 'Undo', onClick: () => { void actions.unmark(id); } },
+      action: { label: 'Undo', onClick: () => { actions.unmark(id, voided); } },
     });
   }
 

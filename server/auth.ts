@@ -44,6 +44,32 @@ export async function verifyAccessJwt(token: string, env: Env): Promise<string |
   }
 }
 
+/**
+ * Hono middleware: 403 for a state-changing request sent by another site.
+ *
+ * Access authenticates with a cookie the browser attaches on its own, so
+ * without this a page elsewhere could POST here as a signed-in user — a plain
+ * form post needs no CORS preflight, and the handlers parse any body as JSON.
+ * Safe methods pass (they change nothing, and CORS keeps their responses
+ * unreadable cross-site). Browsers send Sec-Fetch-Site (or at least Origin)
+ * on every POST; a request with neither isn't from a browser, so it carries
+ * no ambient cookie to abuse.
+ */
+export const rejectCrossSite: MiddlewareHandler = async (c, next) => {
+  if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.method === 'OPTIONS') return next();
+  const site = c.req.header('Sec-Fetch-Site');
+  const origin = c.req.header('Origin');
+  const allowed = site
+    ? site === 'same-origin' || site === 'none'
+    : origin === undefined || sameHost(origin, c.req.url);
+  if (!allowed) return c.json({ error: 'cross-site request refused' }, 403);
+  await next();
+};
+
+function sameHost(origin: string, url: string): boolean {
+  try { return new URL(origin).host === new URL(url).host; } catch { return false; }
+}
+
 /** Hono middleware: 403 unless a valid Access JWT is present; sets c.var.actor. */
 export const requireAccess: MiddlewareHandler<{ Bindings: Env; Variables: { actor: string } }> =
   async (c, next) => {

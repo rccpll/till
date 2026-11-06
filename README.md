@@ -54,7 +54,9 @@ Runs entirely on Cloudflare's free tier (no R2 — it requires a card).
 6. **Phones**: open `https://<project>.pages.dev` in Safari → log in → Share →
    **Add to Home Screen**. Add vouchers from a desktop at `/upload`.
    When the Access session expires the app shows **Sign in again** — tap it;
-   queued changes sync after login. Never remove the home-screen app while
+   queued changes sync after login. The home-screen app updates itself: it
+   checks for a new version whenever it comes back to the foreground and
+   reloads onto it from the wallet list (never on the barcode screen). Never remove the home-screen app while
    cards show **pending**: iOS deletes its storage, and the unsynced queue
    with it (the home-screen app also has its own login, separate from Safari).
 

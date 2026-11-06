@@ -37,6 +37,15 @@ export function back(): void {
   else navigate('/', true);
 }
 
+export function currentRoute(): Route {
+  return current;
+}
+
+export function onRouteChange(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
 export function useRoute(): Route {
   return useSyncExternalStore(
     (cb) => { listeners.add(cb); return () => listeners.delete(cb); },

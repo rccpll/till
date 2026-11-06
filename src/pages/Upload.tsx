@@ -2,7 +2,7 @@
 // parsed facts + the barcode crop are uploaded. Also home of the JSON backup.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, CircleAlert, TriangleAlert } from 'lucide-react';
-import { api, type AppState, type AddRow } from '../lib/api';
+import { api, apiFetch, AuthExpiredError, type AppState, type AddRow } from '../lib/api';
 import { euros, ddmmyyyy, parseEuros } from '../lib/format';
 import type { ParsedVoucher, ParseOutcome } from '../lib/parseVoucherPdf';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table';
+import { SignedOutBanner } from '@/components/signed-out-banner';
 
 const LAST_GROUP_KEY = 'till:last-group';
 
@@ -30,6 +31,7 @@ let rowId = 0;
 export default function Upload() {
   const [state, setState] = useState<AppState | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
+  const [signedOut, setSignedOut] = useState(false);
   const [group, setGroup] = useState(() => localStorage.getItem(LAST_GROUP_KEY) ?? '');
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -39,8 +41,11 @@ export default function Upload() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refreshState = useCallback(() => {
-    api.state().then(s => { setState(s); setStateError(null); })
-      .catch(e => setStateError(String(e)));
+    api.state().then(s => { setState(s); setStateError(null); setSignedOut(false); })
+      .catch(e => {
+        if (e instanceof AuthExpiredError) setSignedOut(true);
+        else setStateError(String(e));
+      });
   }, []);
   useEffect(refreshState, [refreshState]);
 
@@ -99,6 +104,7 @@ export default function Upload() {
       setAttention(prev => [...prev, ...newAttention]);
       refreshState();
     } catch (e) {
+      if (e instanceof AuthExpiredError) setSignedOut(true);
       setAttention(prev => [...prev, { id: ++rowId, file: '(batch)', kind: 'unparseable', detail: String(e) }]);
     } finally {
       setBusy(false);
@@ -136,6 +142,7 @@ export default function Upload() {
       setAttention(rows => rows.filter(r => r.id !== row.id));
       refreshState(); // gtin_amounts now knows this GTIN — future uploads are automatic
     } catch (e) {
+      if (e instanceof AuthExpiredError) setSignedOut(true);
       setAttention(rows => rows.map(r => r.id === row.id ? { ...row, submitting: false, error: String(e) } : r));
     }
   }
@@ -143,7 +150,7 @@ export default function Upload() {
   async function exportBackup() {
     setExporting(true);
     try {
-      const res = await fetch('/api/export');
+      const res = await apiFetch('/api/export', { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const a = document.createElement('a');
@@ -153,7 +160,8 @@ export default function Upload() {
       URL.revokeObjectURL(a.href);
       refreshState();
     } catch (e) {
-      setStateError(`export failed: ${String(e)}`);
+      if (e instanceof AuthExpiredError) setSignedOut(true);
+      else setStateError(`export failed: ${String(e)}`);
     } finally {
       setExporting(false);
     }
@@ -178,6 +186,8 @@ export default function Upload() {
             Only the voucher facts and a small barcode image are stored.
           </p>
         </header>
+
+        {signedOut && <SignedOutBanner detail="vouchers can't be added" next="/upload" />}
 
         <section className="space-y-3">
           <div className="space-y-1.5">

@@ -29,6 +29,22 @@ describe('auth (criterion 10)', () => {
     expect(res.headers.get('Location')).toBe('/');
   });
 
+  it('/api/login returns to a local `next` path', async () => {
+    const res = await call('GET', '/api/login?next=%2Fupload');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/upload');
+  });
+
+  it('/api/login never redirects off-site', async () => {
+    for (const next of [
+      'https://evil.example.com', '//evil.example.com', '/\\evil.example.com', 'upload',
+      '/\t/evil.example.com', '/\n/evil.example.com', '/\r\\evil.example.com', '\t//evil.example.com',
+    ]) {
+      const res = await call('GET', `/api/login?next=${encodeURIComponent(next)}`);
+      expect(res.headers.get('Location'), next).toBe('/');
+    }
+  });
+
   it('/api/login is 403 without a JWT (Access intercepts it in production)', async () => {
     const res = await call('GET', '/api/login', { token: null });
     expect(res.status).toBe(403);
@@ -231,6 +247,90 @@ describe('unmark (criterion 11)', () => {
   });
 });
 
+describe('lost races leave no trace (audit lead 1)', () => {
+  type Ev = { type: string; actor: string; client_action_id: string | null; previous_remaining_cents: number | null };
+  const events = async (id: string) =>
+    ((await (await call('GET', `/api/vouchers/${id}/events`)).json()) as { events: Ev[] }).events;
+
+  it('two simultaneous uses: one wins, the loser writes no event and cannot be replayed', async () => {
+    const { voucher } = await addOne();
+    const [a, b] = await Promise.all([
+      call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: 'race-a' } }),
+      call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: 'race-b' }, email: BOB }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const loser = a.status === 409 ? 'race-a' : 'race-b';
+
+    const used = (await events(voucher.id)).filter(e => e.type === 'used');
+    expect(used).toHaveLength(1);
+    expect(used[0].client_action_id).not.toBe(loser);
+
+    // the offline queue retrying the losing action must still be told no
+    const retry = await call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: loser } });
+    expect(retry.status).toBe(409);
+  });
+
+  it('a spend racing a void: every event matches what was applied', async () => {
+    const { voucher } = await addOne();
+    await Promise.all([
+      call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 500 } }),
+      call('POST', `/api/vouchers/${voucher.id}/void`, { body: { note: 'x' }, email: BOB }),
+    ]);
+    const evs = (await events(voucher.id)).filter(e => e.type === 'spent' || e.type === 'voided');
+    const state = await (await call('GET', '/api/state')).json() as { vouchers: { id: string; status: string; remaining_cents: number }[] };
+    const v = state.vouchers.find(x => x.id === voucher.id)!;
+    // replay the recorded events and land exactly on the stored row
+    let remaining = 2000, status = 'available';
+    for (const e of evs) {
+      expect(e.previous_remaining_cents).toBe(remaining);
+      if (e.type === 'spent') remaining -= 500; else status = 'voided';
+    }
+    // (also guards void's remaining_cents pin: without it the void records a
+    // stale previous_remaining_cents and this replay diverges)
+    expect({ remaining, status }).toEqual({ remaining: v.remaining_cents, status: v.status });
+  });
+});
+
+describe('undo names its action (audit leads 6, 8)', () => {
+  it('undoes the caller’s own action', async () => {
+    const { voucher } = await addOne();
+    await call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 500, client_action_id: 'mine' } });
+    const r = await call('POST', `/api/vouchers/${voucher.id}/unmark`, { body: { undo_action_id: 'mine' } });
+    expect(r.status).toBe(200);
+    expect((await r.json() as { voucher: { remaining_cents: number } }).voucher.remaining_cents).toBe(2000);
+  });
+
+  it('never rolls back someone else’s later change', async () => {
+    const { voucher } = await addOne();
+    await call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 500, client_action_id: 'alice-spend' } });
+    await call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: 'bob-use' }, email: BOB });
+    const r = await call('POST', `/api/vouchers/${voucher.id}/unmark`, { body: { undo_action_id: 'alice-spend' } });
+    expect(r.status).toBe(409);
+    expect(await r.json()).toMatchObject({ reason: 'changed_since', changed_by: BOB });
+    const state = await (await call('GET', '/api/state')).json() as { vouchers: { id: string; status: string; used_by: string }[] };
+    expect(state.vouchers.find(x => x.id === voucher.id)).toMatchObject({ status: 'used', used_by: BOB });
+  });
+
+  it('an Undo of an action that was refused undoes nothing', async () => {
+    const { voucher } = await addOne();
+    await call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: 'bob-first' }, email: BOB });
+    const refused = await call('POST', `/api/vouchers/${voucher.id}/use`, { body: { client_action_id: 'alice-late' } });
+    expect(refused.status).toBe(409);
+    const r = await call('POST', `/api/vouchers/${voucher.id}/unmark`, { body: { undo_action_id: 'alice-late' } });
+    expect(r.status).toBe(409);
+    expect(await r.json()).toMatchObject({ reason: 'not_applied' });
+  });
+
+  it('an undo cannot be undone again', async () => {
+    const { voucher } = await addOne();
+    await call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 500 } });
+    await call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 700 } });
+    expect((await call('POST', `/api/vouchers/${voucher.id}/unmark`, {})).status).toBe(200);
+    const again = await call('POST', `/api/vouchers/${voucher.id}/unmark`, {});
+    expect(again.status).toBe(409);
+  });
+});
+
 describe('scan_failed', () => {
   it('logs an event without changing state', async () => {
     const { voucher } = await addOne();
@@ -241,6 +341,36 @@ describe('scan_failed', () => {
     expect(v).toMatchObject({ status: 'available', remaining_cents: 2000 });
     const events = await (await call('GET', `/api/vouchers/${voucher.id}/events`)).json() as { events: { type: string }[] };
     expect(events.events.map(e => e.type)).toEqual(['added', 'scan_failed']);
+  });
+});
+
+describe('cross-site requests (audit leads 2, 3)', () => {
+  const add = (headers: Record<string, string>) =>
+    call('POST', '/api/vouchers', { body: [makeVoucher()], headers });
+
+  it('refuses a write another site sent', async () => {
+    expect((await add({ 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    expect((await add({ 'Sec-Fetch-Site': 'same-site' })).status).toBe(403);
+    // older browsers: Origin only
+    expect((await add({ Origin: 'https://evil.example.com' })).status).toBe(403);
+    expect((await add({ Origin: 'null' })).status).toBe(403);
+  });
+
+  it('allows the app’s own writes', async () => {
+    expect((await add({ 'Sec-Fetch-Site': 'same-origin', Origin: 'http://localhost' })).status).toBe(200);
+    expect((await add({ Origin: 'http://localhost' })).status).toBe(200);
+  });
+
+  it('checks before auth, so a forged write never reaches a handler', async () => {
+    const res = await call('POST', '/api/export', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    expect(res.status).toBe(403);
+  });
+
+  it('export no longer answers GET, so a link or <img> cannot reset the backup reminder', async () => {
+    const before = await (await call('GET', '/api/state')).json() as { last_export_at: string | null };
+    expect((await call('GET', '/api/export')).status).toBe(404);
+    const after = await (await call('GET', '/api/state')).json() as { last_export_at: string | null };
+    expect(after.last_export_at).toBe(before.last_export_at);
   });
 });
 
@@ -260,7 +390,7 @@ describe('original image + export', () => {
     const { voucher } = await addOne({ barcode_png_b64: png });
     await call('POST', `/api/vouchers/${voucher.id}/spend`, { body: { used_cents: 100 } });
     const before = await (await call('GET', '/api/state')).json() as { last_export_at: string | null };
-    const r = await call('GET', '/api/export');
+    const r = await call('POST', '/api/export');
     expect(r.status).toBe(200);
     const dump = await r.json() as { exported_at: string; vouchers: { id: string; barcode_png: string | null }[]; events: unknown[]; gtin_amounts: unknown[] };
     expect(dump.vouchers.length).toBeGreaterThan(0);

@@ -1,7 +1,7 @@
 // The wallet: Available / History tabs, deliberately sparse cards, and the
 // blocking sync-rejection banner. Tapping a card goes straight to the barcode.
 import { useState } from 'react';
-import { LogIn, TriangleAlert, WifiOff } from 'lucide-react';
+import { TriangleAlert, WifiOff } from 'lucide-react';
 import type { Voucher } from '../../lib/api';
 import {
   availableList, expiresSoon, headerCount, headerTotalCents, historyMonths, isSpentOpen,
@@ -13,6 +13,7 @@ import { navigate } from '../../lib/router';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/status-badge';
+import { SignedOutBanner } from '@/components/signed-out-banner';
 
 export default function Wallet() {
   const wallet = useWallet();
@@ -38,15 +39,7 @@ export default function Wallet() {
             )}
           </div>
           {wallet.authExpired && (
-            <div className="mt-4 rounded-xl border bg-card px-4 py-3 flex items-center justify-between gap-3" role="alert">
-              <p className="text-sm">
-                <span className="font-semibold">Signed out</span>
-                <span className="text-muted-foreground"> · changes aren't syncing</span>
-              </p>
-              <Button size="sm" onClick={() => { window.location.href = '/api/login'; }}>
-                <LogIn aria-hidden="true" /> Sign in again
-              </Button>
-            </div>
+            <SignedOutBanner className="mt-4" detail="changes aren't syncing" next="/" />
           )}
         </div>
       </header>
@@ -159,13 +152,21 @@ function RejectionBanner() {
   const r = rejections[0];
   if (!r) return null;
 
-  const body = r.body as { reason?: string; used_by?: string | null; used_at?: string | null } | null;
+  const body = r.body as {
+    reason?: string; used_by?: string | null; used_at?: string | null;
+    changed_by?: string; changed_at?: string;
+  } | null;
+  const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
   const detail =
     body?.reason === 'already_used'
-      ? `already marked used by ${body.used_by ?? 'the other user'}${body.used_at ? ` at ${new Date(body.used_at).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })}` : ''}`
+      ? `already marked used by ${body.used_by ?? 'the other user'}${body.used_at ? ` at ${hhmm(body.used_at)}` : ''}`
       : body?.reason === 'voided'
         ? 'that voucher was voided'
-        : `the server refused it (HTTP ${r.status})`;
+        : body?.reason === 'changed_since'
+          ? `${body.changed_by ?? 'the other user'} changed it after you${body.changed_at ? ` at ${hhmm(body.changed_at)}` : ''}, so it wasn't undone`
+          : body?.reason === 'nothing_to_undo' || body?.reason === 'not_applied'
+            ? 'there was nothing left to undo'
+            : `the server refused it (HTTP ${r.status})`;
 
   return (
     <div className="fixed top-0 inset-x-0 z-50 bg-foreground text-background shadow-lg" role="alert">
