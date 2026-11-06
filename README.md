@@ -84,6 +84,6 @@ Local dev needs `wrangler.toml` too (gitignored — template in Deployment
 step 2). Before any deploy exists, any placeholder UUID works as the
 database id: locally it only names the on-disk SQLite file.
 
-`npm test` runs the API suite against a real D1 (vitest-pool-workers) plus a
+`npm test` runs the API suite against a real D1 (vitest-plugin) plus a
 node suite that parses a real voucher PDF if one is present in the repo root
 (`Voucher_*.pdf`, gitignored; skipped otherwise).

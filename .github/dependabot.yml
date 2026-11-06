@@ -9,11 +9,6 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    ignore:
-      # @cloudflare/vitest-pool-workers pins vitest 4; a vitest major can't
-      # install until the pool supports it. Drop this when it does.
-      - dependency-name: vitest
-        update-types: [version-update:semver-major]
     groups:
       # one PR for all dev-tool minor/patch bumps instead of a dozen
       dev-dependencies:
