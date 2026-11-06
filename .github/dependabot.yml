@@ -1,0 +1,25 @@
+# Weekly dependency PRs. Each one runs the CI workflow; dev-tool updates that
+# pass and aren't a major version merge themselves (see ci.yml). Production
+# packages (hono, jose: the API itself) and majors always wait for a human.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # one PR for all dev-tool minor/patch bumps instead of a dozen
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production:
+        dependency-type: production
+
+  # keeps the commit-pinned actions in .github/workflows current
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
