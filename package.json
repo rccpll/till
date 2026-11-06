@@ -19,7 +19,7 @@
     "jose": "^6.2.15"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/vitest-plugin": "^1.6.0",
     "@cloudflare/workers-types": "^5.0.0",
     "@tailwindcss/vite": "^4.3.4",
     "@types/pngjs": "^6.0.5",
@@ -47,9 +47,6 @@
     "zxing-wasm": "^3.1.6"
   },
   "overrides": {
-    "zod": "^4.6.7",
-    "undici": "^7.30.2",
-    "sharp": "^0.35.5",
     "workbox-build": {
       "glob": "^14.0.4"
     }
