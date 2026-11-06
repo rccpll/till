@@ -31,7 +31,8 @@ describe.skipIf(!samplePath)('real voucher PDF (criteria 1, 2)', () => {
     const { readBarcodes } = await import('zxing-wasm/reader');
     const { PNG } = await import('pngjs');
 
-    const doc = await getDocument({ data: new Uint8Array(await readFile(samplePath!)) }).promise;
+    const task = getDocument({ data: new Uint8Array(await readFile(samplePath!)) });
+    const doc = await task.promise;
     const page = await doc.getPage(1);
     text = (await page.getTextContent()).items
       .map((i: { str?: string }) => i.str ?? '')
@@ -61,7 +62,7 @@ describe.skipIf(!samplePath)('real voucher PDF (criteria 1, 2)', () => {
         break;
       }
     }
-    await doc.destroy();
+    await task.destroy();
   });
 
   it('criterion 2: text layer yields code, printed serial, expiry, amount from filename', () => {
