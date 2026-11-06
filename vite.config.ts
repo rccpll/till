@@ -24,7 +24,11 @@ export default defineConfig({
         navigateFallback: '/index.html',
         // API calls must never be served by the SW cache: the app layer does
         // its own state caching in IndexedDB (stale-while-revalidate).
-        navigateFallbackDenylist: [/^\/api\//],
+        // /cdn-cgi/ is Cloudflare Access's own endpoints: after login, Access
+        // navigates to /cdn-cgi/access/authorized to set the session cookie.
+        // Serving the shell there instead means the cookie is never set and
+        // "Sign in again" loops back to the signed-out banner forever.
+        navigateFallbackDenylist: [/^\/api\//, /^\/cdn-cgi\//],
         runtimeCaching: [],
       },
       manifest: {
