@@ -93,11 +93,14 @@ export async function parseVoucherPdf(
   file: File,
   knownGtinAmounts: Record<string, number>,
 ): Promise<ParseOutcome> {
+  // pdfjs 6 frees the document and its worker through the loading task
+  // (PDFDocumentProxy.destroy() is gone), including when loading fails
+  const task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
   let doc: pdfjs.PDFDocumentProxy;
   try {
-    const data = new Uint8Array(await file.arrayBuffer());
-    doc = await pdfjs.getDocument({ data }).promise;
+    doc = await task.promise;
   } catch (e) {
+    await task.destroy();
     return { kind: 'unparseable', detail: `not a readable PDF (${(e as Error).message})` };
   }
 
@@ -184,6 +187,6 @@ export async function parseVoucherPdf(
   } catch (e) {
     return { kind: 'unparseable', detail: (e as Error).message };
   } finally {
-    await doc.destroy();
+    await task.destroy();
   }
 }
