@@ -15,8 +15,8 @@
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
-    "hono": "^4.13.16",
-    "jose": "^6.2.15"
+    "hono": "^4.13.18",
+    "jose": "^6.2.17"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.8.2",
